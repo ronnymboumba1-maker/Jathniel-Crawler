@@ -1,34 +1,19 @@
 # ============================================
-# JATHNIEL-WEB-CRAWLER-PRO v5.0
+# JATHNIEL-WEB-CRAWLER-PRO v5.1
 # Crawler + DB Extractor
 # ============================================
 
-# --- HTTP (requêtes + streaming) ---
+# HTTP
 requests>=2.31.0
 urllib3>=2.1.0
 certifi>=2023.11.17
 
-# --- Parsing HTML ---
+# Parsing HTML
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 
-# --- MongoDB extraction (module exploit_mongodb) ---
+# MongoDB extraction
 pymongo>=4.6.0
 
-# --- DNS / SSL (pour subdomain enum + port scan) ---
+# DNS (subdomain enum)
 dnspython>=2.4.0
-
-# ============================================
-# NOTE : le reste est dans la stdlib Python
-#   socket, sqlite3, gzip, bz2, lzma, zipfile,
-#   tarfile, threading, queue, hashlib, json,
-#   csv, subprocess, ssl, urllib, etc.
-# ============================================
-
-# ============================================
-# DÉPENDANCES OPTIONNELLES (non installées par défaut)
-# ============================================
-# redis>=5.0.0           # Client Redis Python (fallback socket)
-# elasticsearch>=8.0.0   # Client Elasticsearch officiel
-# jsbeautifier>=1.14.0   # Beautify JS pour parsing avancé
-# colorama>=0.4.6        # Support couleurs Windows natif
