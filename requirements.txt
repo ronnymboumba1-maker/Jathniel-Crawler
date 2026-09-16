@@ -1,3 +1,23 @@
+# ============================================
+# JATHNIEL-WEB-CRAWLER-PRO v4.2
+# Dépendances Python
+# ============================================
+
+# HTTP (requêtes + streaming)
 requests>=2.31.0
+
+# Parsing HTML
 beautifulsoup4>=4.12.0
-urllib3>=2.0.0
+
+# Parser HTML rapide (optionnel mais recommandé)
+lxml>=5.0.0
+
+# SSL (inclus avec requests, mais explicite)
+urllib3>=2.1.0
+certifi>=2023.11.17
+
+# ============================================
+# NOTE : le reste est dans la stdlib Python
+#   sqlite3, gzip, bz2, lzma, zipfile, tarfile,
+#   threading, queue, hashlib, json, csv, etc.
+# ============================================
