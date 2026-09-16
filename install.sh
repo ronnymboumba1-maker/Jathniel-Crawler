@@ -5,7 +5,7 @@
 # Ubuntu / Debian / Kali / WSL
 # ============================================
 
-set -e  # Arrêt en cas d'erreur
+set -e
 
 # --- Couleurs ---
 RED='\033[91m'
@@ -70,38 +70,43 @@ else
     ok "venv disponible"
 fi
 
-# --- 4. Créer le venv ---
-log "Création de l'environnement virtuel..."
-if [ -d "venv" ]; then
-    warn "Le dossier 'venv' existe déjà, réutilisation..."
+# --- 4. Détecter ou créer le venv ---
+if [ -d ".venv" ]; then
+    VENV_DIR=".venv"
+    warn "Dossier '.venv' détecté, réutilisation..."
+elif [ -d "venv" ]; then
+    VENV_DIR="venv"
+    warn "Dossier 'venv' détecté, réutilisation..."
 else
-    python3 -m venv venv
-    ok "Environnement virtuel créé dans ./venv"
+    VENV_DIR=".venv"
+    log "Création du venv dans '$VENV_DIR'..."
+    python3 -m venv "$VENV_DIR"
+    ok "Venv créé dans ./$VENV_DIR"
 fi
 
 # --- 5. Activer le venv ---
-log "Activation du venv..."
+log "Activation de ./$VENV_DIR ..."
 # shellcheck disable=SC1091
-source venv/bin/activate
-ok "venv activé ($(which python3))"
+source "$VENV_DIR/bin/activate"
+ok "Python actif : $(which python3)"
 
 # --- 6. Mettre à jour pip dans le venv ---
 log "Mise à jour de pip..."
-pip install --upgrade pip setuptools wheel 2>&1 | tail -1
+python3 -m pip install --upgrade pip setuptools wheel 2>&1 | tail -1
 ok "pip à jour"
 
 # --- 7. Installer les dépendances ---
 log "Installation des dépendances (requirements.txt)..."
 if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
-    ok "Dépendances installées"
+    python3 -m pip install -r requirements.txt
+    ok "Dépendances installées via requirements.txt"
 else
     warn "requirements.txt introuvable, installation manuelle..."
-    pip install requests beautifulsoup4 lxml urllib3 certifi
-    ok "Dépendances installées (manuelles)"
+    python3 -m pip install requests beautifulsoup4 lxml urllib3 certifi
+    ok "Dépendances installées manuellement"
 fi
 
-# --- 8. Vérifier l'import ---
+# --- 8. Vérification des imports ---
 log "Vérification des imports..."
 python3 -c "
 import requests
@@ -115,21 +120,25 @@ print('  sqlite3: OK')
 print('  compression: OK')
 " && ok "Tous les imports fonctionnent"
 
-# --- 9. Vérifier que le crawler est présent ---
-log "Vérification du crawler..."
-if [ -f "crawler.py" ]; then
-    ok "crawler.py trouvé"
-elif [ -f "JATHNIEL-WEB-CRAWLER-PRO.py" ]; then
-    ok "JATHNIEL-WEB-CRAWLER-PRO.py trouvé"
-else
-    warn "Aucun fichier crawler détecté dans le dossier courant"
-    warn "Assure-toi d'avoir placé crawler.py ici"
-fi
-
-# --- 10. Créer le dossier de sortie ---
+# --- 9. Créer le dossier de sortie ---
 log "Création des dossiers de sortie..."
 mkdir -p crawled_sites
 ok "Dossier 'crawled_sites/' créé"
+
+# --- 10. Détecter le fichier crawler ---
+CRAWLER_FILE=""
+for f in crawler.py jathniel_crawler.py JATHNIEL-WEB-CRAWLER-PRO.py; do
+    if [ -f "$f" ]; then
+        CRAWLER_FILE="$f"
+        break
+    fi
+done
+
+if [ -n "$CRAWLER_FILE" ]; then
+    ok "Fichier crawler détecté : $CRAWLER_FILE"
+else
+    warn "Aucun fichier crawler détecté (crawler.py / jathniel_crawler.py)"
+fi
 
 # --- 11. Résumé ---
 echo ""
@@ -140,10 +149,14 @@ echo ""
 echo -e "  ${BOLD}Prochaines étapes :${NC}"
 echo ""
 echo -e "  1. Activer le venv :"
-echo -e "     ${CYAN}source venv/bin/activate${NC}"
+echo -e "     ${CYAN}source $VENV_DIR/bin/activate${NC}"
 echo ""
 echo -e "  2. Lancer le crawler :"
-echo -e "     ${CYAN}python3 crawler.py${NC}"
+if [ -n "$CRAWLER_FILE" ]; then
+    echo -e "     ${CYAN}python3 $CRAWLER_FILE${NC}"
+else
+    echo -e "     ${CYAN}python3 <ton_fichier>.py${NC}"
+fi
 echo ""
 echo -e "  3. Pour quitter le venv :"
 echo -e "     ${CYAN}deactivate${NC}"
