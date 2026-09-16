@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================
-# JATHNIEL-WEB-CRAWLER-PRO v4.2
+# JATHNIEL-WEB-CRAWLER-PRO v5.0
 # Script d'installation automatique
 # Ubuntu / Debian / Kali / WSL
 # ============================================
@@ -31,8 +31,8 @@ cat << "EOF"
 ║   ██║██║  ██║   ██║   ██║  ██║██║ ╚████║██║███████╗███████╗╚██████╔╝         ║
 ║   ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚══════╝╚══════╝ ╚═════╝          ║
 ║                                                                              ║
-║              WEB CRAWLER PRO v4.2 — Installation                             ║
-║         🛡️  CTF / Labo - Usage autorisé uniquement                           ║
+║        WEB CRAWLER + DB EXTRACTOR v5.0 — Installation                        ║
+║        🛡️  Usage éducatif / CTF / pentest autorisé uniquement                ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 EOF
@@ -102,7 +102,7 @@ if [ -f "requirements.txt" ]; then
     ok "Dépendances installées via requirements.txt"
 else
     warn "requirements.txt introuvable, installation manuelle..."
-    python3 -m pip install requests beautifulsoup4 lxml urllib3 certifi
+    python3 -m pip install requests beautifulsoup4 lxml urllib3 certifi pymongo dnspython
     ok "Dépendances installées manuellement"
 fi
 
@@ -112,22 +112,60 @@ python3 -c "
 import requests
 import bs4
 import sqlite3
+import socket
 import gzip, bz2, lzma
 import zipfile, tarfile
+import ssl
+import subprocess
 print('  requests:', requests.__version__)
 print('  bs4:', bs4.__version__)
 print('  sqlite3: OK')
+print('  socket: OK')
 print('  compression: OK')
-" && ok "Tous les imports fonctionnent"
+print('  ssl: OK')
+print('  subprocess: OK')
+try:
+    import pymongo
+    print('  pymongo:', pymongo.__version__)
+except ImportError:
+    print('  pymongo: MANQUANT (requis pour MongoDB)')
+try:
+    import dns.resolver
+    print('  dnspython: OK')
+except ImportError:
+    print('  dnspython: MANQUANT (requis pour subdomain enum)')
+" && ok "Tous les imports critiques fonctionnent"
 
-# --- 9. Créer le dossier de sortie ---
+# --- 9. Créer les dossiers de sortie ---
 log "Création des dossiers de sortie..."
 mkdir -p crawled_sites
 ok "Dossier 'crawled_sites/' créé"
 
-# --- 10. Détecter le fichier crawler ---
+# --- 10. Outils système optionnels ---
+log "Vérification des outils système optionnels..."
+
+# git-dumper (pour dump .git/ exposé)
+if ! command -v git-dumper &> /dev/null; then
+    warn "git-dumper non installé (optionnel pour .git/ dump)"
+    read -p "  Installer git-dumper ? (o/n) : " install_gd
+    if [[ "$install_gd" =~ ^[oOyY] ]]; then
+        python3 -m pip install git-dumper 2>&1 | tail -1 && ok "git-dumper installé"
+    fi
+else
+    ok "git-dumper déjà installé"
+fi
+
+# mongosh (fallback MongoDB)
+if ! command -v mongosh &> /dev/null && ! command -v mongo &> /dev/null; then
+    warn "mongosh/mongo non installé (optionnel, fallback pour MongoDB)"
+else
+    ok "mongosh/mongo déjà installé"
+fi
+
+# --- 11. Détecter le fichier crawler ---
 CRAWLER_FILE=""
-for f in crawler.py jathniel_crawler.py JATHNIEL-WEB-CRAWLER-PRO.py; do
+for f in crawler.py jathniel_crawler.py jathniel_crawler_v5.py \
+         JATHNIEL-WEB-CRAWLER-PRO.py; do
     if [ -f "$f" ]; then
         CRAWLER_FILE="$f"
         break
@@ -137,10 +175,11 @@ done
 if [ -n "$CRAWLER_FILE" ]; then
     ok "Fichier crawler détecté : $CRAWLER_FILE"
 else
-    warn "Aucun fichier crawler détecté (crawler.py / jathniel_crawler.py)"
+    warn "Aucun fichier crawler détecté"
+    warn "→ Place ton fichier .py dans ce dossier"
 fi
 
-# --- 11. Résumé ---
+# --- 12. Résumé ---
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  ✓ INSTALLATION TERMINÉE${NC}"
@@ -158,12 +197,12 @@ else
     echo -e "     ${CYAN}python3 <ton_fichier>.py${NC}"
 fi
 echo ""
-echo -e "  3. Pour quitter le venv :"
-echo -e "     ${CYAN}deactivate${NC}"
+echo -e "  3. Menu recommandé :"
+echo -e "     ${CYAN}→ Option 3 : RECON COMPLET (tous les modules)${NC}"
 echo ""
 echo -e "  ${YELLOW}⚠️  Rappel légal :${NC}"
 echo -e "     Usage éducatif / CTF / pentest AUTORISÉ uniquement."
-echo -e "     Ne jamais cibler un site sans autorisation écrite."
+echo -e "     Ne JAMAIS scanner un site sans autorisation écrite."
 echo ""
-echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+echo -e "${G lREEN}════════════════════════════════════════════════════════════${NC}"
 echo ""
