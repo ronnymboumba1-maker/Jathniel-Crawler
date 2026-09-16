@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # ============================================
-# JATHNIEL-WEB-CRAWLER-PRO v5.0
+# JATHNIEL-WEB-CRAWLER-PRO v5.1
 # Script d'installation automatique
-# Ubuntu / Debian / Kali / WSL
 # ============================================
 
 set -e
@@ -16,43 +15,40 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 log()   { echo -e "${CYAN}[*]${NC} $1"; }
-ok()    { echo -e "${GREEN}[✓]${NC} $1"; }
+ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
-err()   { echo -e "${RED}[✗]${NC} $1"; }
+err()   { echo -e "${RED}[X]${NC} $1"; }
 
-# --- Bannière ---
+# --- Banniere (ASCII pur, compatible partout) ---
+echo ""
 cat << "EOF"
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                                                                              ║
-║   ██╗ █████╗ ████████╗██╗  ██╗███╗   ██╗██╗███████╗██╗     ██╗   ██╗         ║
-║   ██║██╔══██╗╚══██╔══╝██║  ██║████╗  ██║██║██╔════╝██║     ██║   ██║         ║
-║   ██║███████║   ██║   ███████║██╔██╗ ██║██║█████╗  ██║     ██║   ██║         ║
-║   ██║██╔══██║   ██║   ██╔══██║██║╚██╗██║██║██╔══╝  ██║     ██║   ██║         ║
-║   ██║██║  ██║   ██║   ██║  ██║██║ ╚████║██║███████╗███████╗╚██████╔╝         ║
-║   ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚══════╝╚══════╝ ╚═════╝          ║
-║                                                                              ║
-║        WEB CRAWLER + DB EXTRACTOR v5.0 — Installation                        ║
-║        🛡️  Usage éducatif / CTF / pentest autorisé uniquement                ║
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-EOF
 
+     _   _   _  _____ _   _ _   _ ___ _____ _
+    | | | | | ||_   _| | | | \ | |_ _| ____| |
+ _  | | | | | |  | | | |_| |  \| || ||  _| | |
+| |_| | |_| |   | | |  _  | |\  || || |___| |___
+ \___/ \___/    |_| |_| |_|_| \_|___|_____|_____|
+
+    WEB CRAWLER + DB EXTRACTOR v5.1
+    Usage educatif / CTF / pentest autorise uniquement
+
+EOF
 echo ""
 
-# --- 1. Vérifier Python ---
-log "Vérification de Python..."
+# --- 1. Verifier Python ---
+log "Verification de Python..."
 if ! command -v python3 &> /dev/null; then
-    err "Python3 n'est pas installé."
+    err "Python3 n'est pas installe."
     log "Installation de Python3..."
     sudo apt update
     sudo apt install -y python3 python3-pip python3-venv
 else
     PY_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
-    ok "Python3 détecté : $PY_VERSION"
+    ok "Python3 detecte : $PY_VERSION"
 fi
 
-# --- 2. Vérifier pip ---
-log "Vérification de pip..."
+# --- 2. Verifier pip ---
+log "Verification de pip..."
 if ! python3 -m pip --version &> /dev/null; then
     warn "pip manquant, installation..."
     sudo apt update
@@ -61,8 +57,8 @@ else
     ok "pip disponible"
 fi
 
-# --- 3. Vérifier venv ---
-log "Vérification de venv..."
+# --- 3. Verifier venv ---
+log "Verification de venv..."
 if ! python3 -c "import venv" &> /dev/null; then
     warn "venv manquant, installation..."
     sudo apt install -y python3-venv
@@ -70,18 +66,18 @@ else
     ok "venv disponible"
 fi
 
-# --- 4. Détecter ou créer le venv ---
+# --- 4. Detecter ou creer le venv ---
 if [ -d ".venv" ]; then
     VENV_DIR=".venv"
-    warn "Dossier '.venv' détecté, réutilisation..."
+    warn "Dossier '.venv' detecte, reutilisation..."
 elif [ -d "venv" ]; then
     VENV_DIR="venv"
-    warn "Dossier 'venv' détecté, réutilisation..."
+    warn "Dossier 'venv' detecte, reutilisation..."
 else
     VENV_DIR=".venv"
-    log "Création du venv dans '$VENV_DIR'..."
+    log "Creation du venv dans '$VENV_DIR'..."
     python3 -m venv "$VENV_DIR"
-    ok "Venv créé dans ./$VENV_DIR"
+    ok "Venv cree dans ./$VENV_DIR"
 fi
 
 # --- 5. Activer le venv ---
@@ -90,24 +86,24 @@ log "Activation de ./$VENV_DIR ..."
 source "$VENV_DIR/bin/activate"
 ok "Python actif : $(which python3)"
 
-# --- 6. Mettre à jour pip dans le venv ---
-log "Mise à jour de pip..."
+# --- 6. Mettre a jour pip ---
+log "Mise a jour de pip..."
 python3 -m pip install --upgrade pip setuptools wheel 2>&1 | tail -1
-ok "pip à jour"
+ok "pip a jour"
 
-# --- 7. Installer les dépendances ---
-log "Installation des dépendances (requirements.txt)..."
+# --- 7. Installer les dependances ---
+log "Installation des dependances..."
 if [ -f "requirements.txt" ]; then
     python3 -m pip install -r requirements.txt
-    ok "Dépendances installées via requirements.txt"
+    ok "Dependances installees via requirements.txt"
 else
     warn "requirements.txt introuvable, installation manuelle..."
     python3 -m pip install requests beautifulsoup4 lxml urllib3 certifi pymongo dnspython
-    ok "Dépendances installées manuellement"
+    ok "Dependances installees manuellement"
 fi
 
-# --- 8. Vérification des imports ---
-log "Vérification des imports..."
+# --- 8. Verification des imports ---
+log "Verification des imports..."
 python3 -c "
 import requests
 import bs4
@@ -122,47 +118,24 @@ print('  bs4:', bs4.__version__)
 print('  sqlite3: OK')
 print('  socket: OK')
 print('  compression: OK')
-print('  ssl: OK')
-print('  subprocess: OK')
 try:
     import pymongo
     print('  pymongo:', pymongo.__version__)
 except ImportError:
-    print('  pymongo: MANQUANT (requis pour MongoDB)')
+    print('  pymongo: MANQUANT')
 try:
     import dns.resolver
     print('  dnspython: OK')
 except ImportError:
-    print('  dnspython: MANQUANT (requis pour subdomain enum)')
-" && ok "Tous les imports critiques fonctionnent"
+    print('  dnspython: MANQUANT')
+" && ok "Imports critiques OK"
 
-# --- 9. Créer les dossiers de sortie ---
-log "Création des dossiers de sortie..."
+# --- 9. Creer les dossiers de sortie ---
+log "Creation des dossiers de sortie..."
 mkdir -p crawled_sites
-ok "Dossier 'crawled_sites/' créé"
+ok "Dossier 'crawled_sites/' cree"
 
-# --- 10. Outils système optionnels ---
-log "Vérification des outils système optionnels..."
-
-# git-dumper (pour dump .git/ exposé)
-if ! command -v git-dumper &> /dev/null; then
-    warn "git-dumper non installé (optionnel pour .git/ dump)"
-    read -p "  Installer git-dumper ? (o/n) : " install_gd
-    if [[ "$install_gd" =~ ^[oOyY] ]]; then
-        python3 -m pip install git-dumper 2>&1 | tail -1 && ok "git-dumper installé"
-    fi
-else
-    ok "git-dumper déjà installé"
-fi
-
-# mongosh (fallback MongoDB)
-if ! command -v mongosh &> /dev/null && ! command -v mongo &> /dev/null; then
-    warn "mongosh/mongo non installé (optionnel, fallback pour MongoDB)"
-else
-    ok "mongosh/mongo déjà installé"
-fi
-
-# --- 11. Détecter le fichier crawler ---
+# --- 10. Detection du fichier crawler ---
 CRAWLER_FILE=""
 for f in crawler.py jathniel_crawler.py jathniel_crawler_v5.py \
          JATHNIEL-WEB-CRAWLER-PRO.py; do
@@ -173,19 +146,18 @@ for f in crawler.py jathniel_crawler.py jathniel_crawler_v5.py \
 done
 
 if [ -n "$CRAWLER_FILE" ]; then
-    ok "Fichier crawler détecté : $CRAWLER_FILE"
+    ok "Fichier crawler detecte : $CRAWLER_FILE"
 else
-    warn "Aucun fichier crawler détecté"
-    warn "→ Place ton fichier .py dans ce dossier"
+    warn "Aucun fichier crawler detecte"
 fi
 
-# --- 12. Résumé ---
+# --- 11. Resume ---
 echo ""
-echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✓ INSTALLATION TERMINÉE${NC}"
-echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}========================================================${NC}"
+echo -e "${GREEN}  INSTALLATION TERMINEE${NC}"
+echo -e "${GREEN}========================================================${NC}"
 echo ""
-echo -e "  ${BOLD}Prochaines étapes :${NC}"
+echo -e "  ${BOLD}Prochaines etapes :${NC}"
 echo ""
 echo -e "  1. Activer le venv :"
 echo -e "     ${CYAN}source $VENV_DIR/bin/activate${NC}"
@@ -197,12 +169,12 @@ else
     echo -e "     ${CYAN}python3 <ton_fichier>.py${NC}"
 fi
 echo ""
-echo -e "  3. Menu recommandé :"
-echo -e "     ${CYAN}→ Option 3 : RECON COMPLET (tous les modules)${NC}"
+echo -e "  3. Menu recommande :"
+echo -e "     ${CYAN}Option 3 : RECON COMPLET${NC}"
 echo ""
-echo -e "  ${YELLOW}⚠️  Rappel légal :${NC}"
-echo -e "     Usage éducatif / CTF / pentest AUTORISÉ uniquement."
-echo -e "     Ne JAMAIS scanner un site sans autorisation écrite."
+echo -e "  ${YELLOW}Rappel legal :${NC}"
+echo -e "     Usage educatif / CTF / pentest AUTORISE uniquement."
+echo -e "     Ne JAMAIS scanner un site sans autorisation ecrite."
 echo ""
-echo -e "${G lREEN}════════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}========================================================${NC}"
 echo ""
