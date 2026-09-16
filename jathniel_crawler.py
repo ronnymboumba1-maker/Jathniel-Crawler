@@ -2,24 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-JATHNIEL-WEB-CRAWLER-PRO v4.1
+JATHNIEL-WEB-CRAWLER-PRO v4.2
 Crawler web professionnel avec détection et extraction de bases de données exposées
 
 Pour Ubuntu/WSL - Usage éducatif et tests de sécurité autorisés uniquement
 (cadre CTF, labo personnel, DVWA, WebGoat, etc.)
 
-CHANGELOG v4.1:
-[FIX] Threading refondu avec queue.Queue + semaphore (plus de pages ratees)
-[FIX] Race condition sur visited_urls (lock correct)
-[FIX] Multi-DB dans ZIP (plus d'ecrasement)
-[FIX] Plus de re-GET dans les analyses (HTML en cache)
-[FIX] Admin bruteforce : UA rotatif + delai aleatoire
-[FIX] Erreurs loguees dans errors.log au lieu de 'pass'
-[FIX] Redis dump : filtre bruit + dedup
-[FIX] Telechargements en streaming (limite RAM)
-[ADD] Amorcage via robots.txt + sitemap.xml
-[ADD] Reset d'etat entre deux crawls
-[ADD] Log d'erreurs centralise
+CHANGELOG v4.2:
+[FIX] Worker ne sort plus trop tôt (verif active_workers + queue)
+[FIX] download_asset / download_sensitive_file : lock unique + cleanup garanti
+[FIX] response.close() systematique (fin des fuites de sockets)
+[FIX] Log d'erreurs visible + print en cas d'echec DL
+[FIX] Reset complet de l'etat entre deux crawls
+[ADD] Option 11 : changer de cible (avec reset des resultats)
+[ADD] Badge cible dans le menu principal
+[ADD] Verification de taille en streaming (robuste aux gros fichiers)
 """
 
 import os
@@ -40,10 +37,10 @@ import bz2
 import lzma
 import zipfile
 import tarfile
+import csv
 from datetime import datetime
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode
 from typing import Dict, List, Tuple, Optional, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque, defaultdict
 from io import BytesIO
 
@@ -51,7 +48,6 @@ import requests
 from bs4 import BeautifulSoup
 import mimetypes
 
-# Desactiver les avertissements SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -67,7 +63,7 @@ class JATHNIELCrawlerPro:
             'threads': 10,
             'timeout': 30,
             'delay': 0.5,
-            'user_agent': 'JATHNIEL-Crawler-Pro/4.1 (Educational; CTF/Lab)',
+            'user_agent': 'JATHNIEL-Crawler-Pro/4.2 (Educational; CTF/Lab)',
             'output_dir': './crawled_sites',
             'download_sensitive': True,
             'download_assets': True,
@@ -87,30 +83,7 @@ class JATHNIELCrawlerPro:
         self._crawled_urls = set()
         self._seed_urls = []
         self.queue = deque()
-        self.results = {
-            'pages': [],
-            'assets': [],
-            'sensitive_files': [],
-            'databases': [],
-            'db_contents': {},
-            'forms': [],
-            'links': [],
-            'emails': [],
-            'technologies': [],
-            'admin_pages': [],
-            'comments': [],
-            'vulnerabilities': [],
-            'statistics': {
-                'total_pages': 0,
-                'total_assets': 0,
-                'total_sensitive': 0,
-                'total_databases': 0,
-                'total_size': 0,
-                'start_time': None,
-                'end_time': None,
-                'duration': 0
-            }
-        }
+        self.results = self._empty_results()
 
         self.lock = threading.Lock()
         self.scanning = False
@@ -240,6 +213,44 @@ class JATHNIELCrawlerPro:
 
     # ==================== UTILITAIRES ====================
 
+    def _empty_results(self):
+        """Retourne une structure de resultats vide (pour reset)."""
+        return {
+            'pages': [],
+            'assets': [],
+            'sensitive_files': [],
+            'databases': [],
+            'db_contents': {},
+            'forms': [],
+            'links': [],
+            'emails': [],
+            'technologies': [],
+            'admin_pages': [],
+            'comments': [],
+            'vulnerabilities': [],
+            'statistics': {
+                'total_pages': 0,
+                'total_assets': 0,
+                'total_sensitive': 0,
+                'total_databases': 0,
+                'total_size': 0,
+                'start_time': None,
+                'end_time': None,
+                'duration': 0
+            }
+        }
+
+    def reset_state(self):
+        """Reset complet de l'etat (pour changer de cible)."""
+        self.target_url = ""
+        self.target_domain = ""
+        self.visited_urls = set()
+        self.visited_files = set()
+        self._crawled_urls = set()
+        self._seed_urls = []
+        self.queue = deque()
+        self.results = self._empty_results()
+
     def clear_screen(self):
         os.system('clear' if os.name == 'posix' else 'cls')
 
@@ -259,12 +270,19 @@ class JATHNIELCrawlerPro:
         return f"{colors.get(color, '')}{bold_text}{text}{colors['end']}"
 
     def log_error(self, message):
-        with self.lock:
-            try:
+        try:
+            with self.lock:
                 with open(self.error_log_path, 'a', encoding='utf-8') as f:
                     f.write(f"[{datetime.now().isoformat()}] {message}\n")
-            except Exception:
-                pass
+        except Exception:
+            pass
+
+    def format_size(self, bytes):
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes < 1024:
+                return f"{bytes:.2f} {unit}"
+            bytes /= 1024
+        return f"{bytes:.2f} TB"
 
     def show_banner(self):
         banner = f"""
@@ -275,7 +293,7 @@ class JATHNIELCrawlerPro:
 {self.colorize('║', 'cyan')}  {self.colorize('██║██╔══██║   ██║   ██╔══██║██║╚██╗██║██║██╔══╝  ██║     ██║   ██║', 'red')}  {self.colorize('║', 'cyan')}
 {self.colorize('║', 'cyan')}  {self.colorize('██║██║  ██║   ██║   ██║  ██║██║ ╚████║██║███████╗███████╗╚██████╔╝', 'red')}  {self.colorize('║', 'cyan')}
 {self.colorize('║', 'cyan')}  {self.colorize('╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚══════╝╚══════╝ ╚═════╝ ', 'red')}  {self.colorize('║', 'cyan')}
-{self.colorize('║', 'cyan')}  {self.colorize('              WEB CRAWLER PRO v4.1 - JATHNIEL EDITION', 'yellow')}  {self.colorize('║', 'cyan')}
+{self.colorize('║', 'cyan')}  {self.colorize('              WEB CRAWLER PRO v4.2 - JATHNIEL EDITION', 'yellow')}  {self.colorize('║', 'cyan')}
 {self.colorize('║', 'cyan')}  {self.colorize('     🕷️  Crawler + Extraction de bases de donnees exposees  🕷️', 'green')}  {self.colorize('║', 'cyan')}
 {self.colorize('║', 'cyan')}  {self.colorize('           🛡️  CTF / Labo - Usage autorise uniquement  🛡️', 'magenta')}  {self.colorize('║', 'cyan')}
 {self.colorize('║', 'cyan')}  {self.colorize('                              ★  JATHNIEL  ★                                  ', 'yellow')}  {self.colorize('║', 'cyan')}
@@ -285,24 +303,26 @@ class JATHNIELCrawlerPro:
 
     def show_menu(self):
         status = self.colorize('● EN COURS', 'green') if self.scanning else self.colorize('○ ARRETE', 'red')
+        target_display = self.target_url if self.target_url else self.colorize('Aucune', 'red')
 
         menu = f"""
 {self.colorize('┌────────────────────────────────────────────────────────────────────────────────────┐', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('MENU PRINCIPAL - WEB CRAWLER PRO v4.1', 'bold')}                                          {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('MENU PRINCIPAL - WEB CRAWLER PRO v4.2', 'bold')}                                          {self.colorize('│', 'cyan')}
 {self.colorize('├────────────────────────────────────────────────────────────────────────────────────┤', 'cyan')}
 {self.colorize('│', 'cyan')}  {self.colorize('1.', 'yellow')}  {self.colorize('Lancer un crawl complet', 'white')}                                                 {self.colorize('│', 'cyan')}
 {self.colorize('│', 'cyan')}  {self.colorize('2.', 'yellow')}  {self.colorize('Crawl + extraction de bases de donnees', 'white')}                              {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('3.', 'yellow')}  {self.colorize('Telecharger un fichier specifique', 'white')}                                       {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('4.', 'yellow')}  {self.colorize('Voir les resultats du crawl', 'white')}                                             {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('5.', 'yellow')}  {self.colorize('Voir les fichiers sensibles trouves', 'white')}                                     {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('6.', 'yellow')}  {self.colorize('Voir les bases de donnees extraites', 'white')}                                   {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('7.', 'yellow')}  {self.colorize('Exporter les resultats (JSON/HTML)', 'white')}                                      {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('8.', 'yellow')}  {self.colorize('Configuration', 'white')}                                                          {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('9.', 'yellow')}  {self.colorize('Statistiques du crawl', 'white')}                                                   {self.colorize('│', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('10.', 'yellow')} {self.colorize('Aide / Documentation', 'white')}                                                    {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('3.', 'yellow')}  {self.colorize('Changer la cible actuelle', 'white')}                                              {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('4.', 'yellow')}  {self.colorize('Telecharger un fichier specifique', 'white')}                                       {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('5.', 'yellow')}  {self.colorize('Voir les resultats du crawl', 'white')}                                             {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('6.', 'yellow')}  {self.colorize('Voir les fichiers sensibles trouves', 'white')}                                     {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('7.', 'yellow')}  {self.colorize('Voir les bases de donnees extraites', 'white')}                                   {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('8.', 'yellow')}  {self.colorize('Exporter les resultats (JSON/HTML/CSV)', 'white')}                                  {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('9.', 'yellow')}  {self.colorize('Configuration', 'white')}                                                          {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('10.', 'yellow')} {self.colorize('Statistiques du crawl', 'white')}                                                   {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('11.', 'yellow')} {self.colorize('Aide / Documentation', 'white')}                                                    {self.colorize('│', 'cyan')}
 {self.colorize('│', 'cyan')}  {self.colorize('0.', 'yellow')}  {self.colorize('Quitter', 'white')}                                                               {self.colorize('│', 'cyan')}
 {self.colorize('├────────────────────────────────────────────────────────────────────────────────────┤', 'cyan')}
-{self.colorize('│', 'cyan')}  {self.colorize('📌 Cible:', 'bold')} {self.target_url if self.target_url else self.colorize('Aucune', 'red')}  {self.colorize('│', 'cyan')}
+{self.colorize('│', 'cyan')}  {self.colorize('📌 Cible:', 'bold')} {target_display[:70]:<70} {self.colorize('│', 'cyan')}
 {self.colorize('│', 'cyan')}  {self.colorize('📄 Pages:', 'bold')} {self.results['statistics']['total_pages']}  {self.colorize('📁 Sensibles:', 'bold')} {self.results['statistics']['total_sensitive']}  {self.colorize('🗄️  DB:', 'bold')} {self.results['statistics']['total_databases']}  {self.colorize('│', 'cyan')}
 {self.colorize('│', 'cyan')}  {self.colorize('📊 Statut:', 'bold')} {status}  {self.colorize('│', 'cyan')}
 {self.colorize('└────────────────────────────────────────────────────────────────────────────────────┘', 'cyan')}
@@ -325,13 +345,6 @@ class JATHNIELCrawlerPro:
                 return False
             else:
                 print(self.colorize("❌ Repondez par 'o' ou 'n'", 'red'))
-
-    def format_size(self, bytes):
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if bytes < 1024:
-                return f"{bytes:.2f} {unit}"
-            bytes /= 1024
-        return f"{bytes:.2f} TB"
 
     # ==================== AMORCAGE ====================
 
@@ -392,22 +405,7 @@ class JATHNIELCrawlerPro:
         self._crawled_urls = set()
         self._seed_urls = []
         self.queue = deque()
-        self.results['pages'] = []
-        self.results['assets'] = []
-        self.results['sensitive_files'] = []
-        self.results['databases'] = []
-        self.results['db_contents'] = {}
-        self.results['forms'] = []
-        self.results['links'] = []
-        self.results['emails'] = []
-        self.results['technologies'] = []
-        self.results['admin_pages'] = []
-        self.results['comments'] = []
-        self.results['statistics'].update({
-            'total_pages': 0, 'total_assets': 0, 'total_sensitive': 0,
-            'total_databases': 0, 'total_size': 0, 'start_time': None,
-            'end_time': None, 'duration': 0
-        })
+        self.results = self._empty_results()
 
         # Dossiers de sortie
         site_dir = f"{self.config['output_dir']}/{self.target_domain}"
@@ -427,7 +425,10 @@ class JATHNIELCrawlerPro:
 
         # Amorcage
         print(self.colorize("\n🌱 Amorcage via robots.txt / sitemap.xml...", 'yellow'))
-        self.seed_from_robots_and_sitemap(url)
+        try:
+            self.seed_from_robots_and_sitemap(url)
+        except Exception as e:
+            self.log_error(f"seed_from_robots: {e}")
 
         # Queue thread-safe
         page_queue = queue.Queue()
@@ -435,7 +436,7 @@ class JATHNIELCrawlerPro:
         for seed_url in self._seed_urls:
             page_queue.put((seed_url, 1))
 
-        # Semaphore : compte les workers actifs
+        # Semaphore + flag
         active_workers = [0]
         active_lock = threading.Lock()
         stop_flag = threading.Event()
@@ -443,8 +444,12 @@ class JATHNIELCrawlerPro:
         def worker():
             while not stop_flag.is_set():
                 try:
-                    current_url, depth = page_queue.get(timeout=2)
+                    current_url, depth = page_queue.get(timeout=5)
                 except queue.Empty:
+                    # Si aucun worker actif et queue vide, on peut sortir
+                    with active_lock:
+                        if active_workers[0] > 0 or not page_queue.empty():
+                            continue
                     return
                 try:
                     with active_lock:
@@ -471,27 +476,35 @@ class JATHNIELCrawlerPro:
             t.start()
             threads.append(t)
 
-        # Attendre : queue vide ET zero worker actif (2 checks espaces)
-        while True:
-            time.sleep(0.8)
+        # Attente : 3 confirmations successives d'inactivite
+        idle_count = 0
+        while idle_count < 3:
+            time.sleep(1.0)
             with active_lock:
-                is_idle = (page_queue.empty() and active_workers[0] == 0)
-            if is_idle:
-                time.sleep(0.8)
-                with active_lock:
-                    is_idle = (page_queue.empty() and active_workers[0] == 0)
-                if is_idle:
-                    stop_flag.set()
-                    break
+                idle = (page_queue.empty() and active_workers[0] == 0)
+            if idle:
+                idle_count += 1
+            else:
+                idle_count = 0
 
+        stop_flag.set()
         for t in threads:
-            t.join(timeout=5)
+            t.join(timeout=10)
 
-        # Analyses complementaires (a partir du cache HTML)
+        # Analyses complementaires
         print(self.colorize("\n🔍 Analyse complementaire...", 'yellow'))
-        self.detect_technologies()
-        self.find_admin_pages()
-        self.extract_emails()
+        try:
+            self.detect_technologies()
+        except Exception as e:
+            self.log_error(f"detect_technologies: {e}")
+        try:
+            self.find_admin_pages()
+        except Exception as e:
+            self.log_error(f"find_admin_pages: {e}")
+        try:
+            self.extract_emails()
+        except Exception as e:
+            self.log_error(f"extract_emails: {e}")
 
         self.results['statistics']['end_time'] = datetime.now()
         self.results['statistics']['duration'] = (
@@ -507,7 +520,14 @@ class JATHNIELCrawlerPro:
         print(f"🗄️  Bases de donnees: {self.results['statistics']['total_databases']}")
         print(f"📦 Assets: {self.results['statistics']['total_assets']}")
         print(f"📊 Duree: {self.results['statistics']['duration']:.2f} secondes")
-        print(f"📝 Log d'erreurs: {self.error_log_path}")
+        if os.path.exists(self.error_log_path):
+            try:
+                with open(self.error_log_path, 'r') as f:
+                    n_errors = len(f.readlines())
+                if n_errors > 0:
+                    print(f"📝 Log d'erreurs: {self.error_log_path} ({n_errors} entrees)")
+            except Exception:
+                pass
 
     def crawl_page(self, url, depth, site_dir, page_queue):
         """Crawl une page individuelle."""
@@ -569,7 +589,7 @@ class JATHNIELCrawlerPro:
             with self.lock:
                 self.results['comments'].extend(comments)
 
-            # Delai aleatoire anti-ban
+            # Delai aleatoire
             time.sleep(random.uniform(self.config['delay'], self.config['delay'] * 2))
 
         except Exception as e:
@@ -627,63 +647,84 @@ class JATHNIELCrawlerPro:
             self.download_asset(asset_url, site_dir)
 
     def download_asset(self, url, site_dir):
-        """Telecharge un asset en streaming."""
-        if url in self.visited_files:
-            return
+        """Telecharge un asset en streaming (robuste)."""
         with self.lock:
             if url in self.visited_files:
                 return
             self.visited_files.add(url)
 
+        tmp_path = None
         try:
-            with requests.get(
+            response = requests.get(
                 url,
                 headers={'User-Agent': self.config['user_agent']},
                 timeout=self.config['timeout'],
                 verify=self.config['verify_ssl'],
-                stream=True
-            ) as response:
-                if response.status_code != 200:
-                    return
+                stream=True,
+                allow_redirects=True,
+            )
 
-                filename = urlparse(url).path.split('/')[-1]
-                if not filename:
-                    filename = hashlib.md5(url.encode()).hexdigest()
+            if response.status_code != 200:
+                response.close()
+                return
 
-                ext = os.path.splitext(filename)[1]
-                if not ext:
-                    content_type = response.headers.get('content-type', '')
-                    ext = mimetypes.guess_extension(content_type.split(';')[0].strip()) or '.bin'
-                    filename += ext
+            filename = urlparse(url).path.split('/')[-1] or hashlib.md5(url.encode()).hexdigest()
+            ext = os.path.splitext(filename)[1]
+            if not ext:
+                content_type = response.headers.get('content-type', '')
+                ext = mimetypes.guess_extension(content_type.split(';')[0].strip()) or '.bin'
+                filename += ext
 
-                filename = re.sub(r'[<>:"/\\|?*]', '_', filename)[:100]
+            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)[:100]
+            filepath = f"{site_dir}/assets/{filename}"
+
+            max_size = 20 * 1024 * 1024
+            size = 0
+            tmp_path = filepath + '.tmp'
+
+            with open(tmp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > max_size:
+                        f.close()
+                        response.close()
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                        self.log_error(f"asset trop gros: {url}")
+                        return
+                    f.write(chunk)
+
+            response.close()
+
+            # Si deja un fichier avec ce nom, on ajoute un hash
+            if os.path.exists(filepath):
+                base, ext = os.path.splitext(filename)
+                filename = f"{base}_{hashlib.md5(url.encode()).hexdigest()[:6]}{ext}"
                 filepath = f"{site_dir}/assets/{filename}"
 
-                max_size = 20 * 1024 * 1024
-                size = 0
-                with open(filepath, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        size += len(chunk)
-                        if size > max_size:
-                            f.close()
-                            try:
-                                os.remove(filepath)
-                            except Exception:
-                                pass
-                            self.log_error(f"asset trop gros: {url}")
-                            return
-                        f.write(chunk)
+            shutil.move(tmp_path, filepath)
+            tmp_path = None
 
-                with self.lock:
-                    self.results['assets'].append({
-                        'url': url, 'filename': filename, 'size': size
-                    })
-                    self.results['statistics']['total_assets'] += 1
+            with self.lock:
+                self.results['assets'].append({
+                    'url': url, 'filename': filename, 'size': size
+                })
+                self.results['statistics']['total_assets'] += 1
 
-                print(f"    📦 Asset: {filename} ({size} o)")
+            print(f"    📦 Asset: {filename} ({size} o)")
 
         except Exception as e:
             self.log_error(f"download_asset({url}): {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def save_page(self, url, html, site_dir):
         filename = urlparse(url).path.replace('/', '_') or 'index'
@@ -762,110 +803,133 @@ class JATHNIELCrawlerPro:
                     self.download_sensitive_file(absolute_url, site_dir)
 
     def download_sensitive_file(self, url, site_dir):
-        """Telecharge un fichier sensible en streaming."""
-        if url in self.visited_files:
-            return False
+        """Telecharge un fichier sensible (robuste + cleanup)."""
         with self.lock:
             if url in self.visited_files:
                 return False
             self.visited_files.add(url)
 
+        tmp_path = None
         try:
-            with requests.get(
+            response = requests.get(
                 url,
                 headers={'User-Agent': self.config['user_agent']},
                 timeout=self.config['timeout'],
                 verify=self.config['verify_ssl'],
-                stream=True
-            ) as response:
-                if response.status_code != 200:
-                    return False
+                stream=True,
+                allow_redirects=True,
+            )
 
-                content_type = response.headers.get('content-type', '').lower()
-                content_length = int(response.headers.get('content-length', 0) or 0)
+            if response.status_code != 200:
+                response.close()
+                return False
 
-                is_db_url = any(url.lower().endswith(ext) for ext in
-                                ['.sql', '.db', '.sqlite', '.sqlite3', '.dump', '.bson', '.rdb'])
-                max_size = 50 * 1024 * 1024 if is_db_url else 10 * 1024 * 1024
+            content_type = response.headers.get('content-type', '').lower()
+            content_length = int(response.headers.get('content-length', 0) or 0)
 
-                if content_length > max_size:
-                    self.log_error(f"trop gros ({content_length}): {url}")
-                    return False
-
-                filename = urlparse(url).path.split('/')[-1]
-                if not filename or filename.endswith('/'):
-                    filename = 'index_' + hashlib.md5(url.encode()).hexdigest()[:8]
-                if '.' not in filename:
-                    ext = mimetypes.guess_extension(content_type.split(';')[0].strip()) or '.bin'
-                    filename += ext
-                filename = re.sub(r'[<>:"/\\|?*]', '_', filename)[:100]
-
-                tmp_path = os.path.join(site_dir, f".tmp_{hashlib.md5(url.encode()).hexdigest()[:8]}")
-                size = 0
-                with open(tmp_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        size += len(chunk)
-                        if size > max_size:
-                            f.close()
-                            try:
-                                os.remove(tmp_path)
-                            except Exception:
-                                pass
-                            self.log_error(f"depasse limite: {url}")
-                            return False
-                        f.write(chunk)
-
-                with open(tmp_path, 'rb') as f:
-                    head = f.read(8192)
-
-                real_type = self.identify_file_type(head)
-
-                is_db = (real_type in ['sqlite', 'mysql_dump', 'postgres_dump',
-                                       'redis_dump', 'bson', 'sqlite_dump', 'sql_dump']) or \
-                        any(filename.lower().endswith(ext) for ext in
+            is_db_url = any(url.lower().split('?')[0].endswith(ext) for ext in
                             ['.sql', '.db', '.sqlite', '.sqlite3', '.dump', '.bson', '.rdb'])
+            max_size = 50 * 1024 * 1024 if is_db_url else 10 * 1024 * 1024
 
-                dest_dir = f"{site_dir}/databases" if is_db else f"{site_dir}/sensitive"
-                os.makedirs(dest_dir, exist_ok=True)
+            if content_length > 0 and content_length > max_size:
+                response.close()
+                self.log_error(f"trop gros ({content_length}): {url}")
+                return False
+
+            filename = urlparse(url).path.split('/')[-1]
+            if not filename or filename.endswith('/'):
+                filename = 'index_' + hashlib.md5(url.encode()).hexdigest()[:8]
+            if '.' not in filename:
+                ext = mimetypes.guess_extension(content_type.split(';')[0].strip()) or '.bin'
+                filename += ext
+            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)[:100]
+
+            tmp_path = os.path.join(site_dir, f".tmp_{hashlib.md5(url.encode()).hexdigest()[:8]}")
+            size = 0
+            with open(tmp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > max_size:
+                        f.close()
+                        response.close()
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                        self.log_error(f"depasse limite ({size}): {url}")
+                        return False
+                    f.write(chunk)
+
+            response.close()
+
+            # Identifier par magic bytes
+            with open(tmp_path, 'rb') as f:
+                head = f.read(8192)
+
+            real_type = self.identify_file_type(head)
+
+            is_db = (real_type in ['sqlite', 'mysql_dump', 'postgres_dump',
+                                   'redis_dump', 'bson', 'sqlite_dump', 'sql_dump']) or \
+                    any(filename.lower().endswith(ext) for ext in
+                        ['.sql', '.db', '.sqlite', '.sqlite3', '.dump', '.bson', '.rdb'])
+
+            dest_dir = f"{site_dir}/databases" if is_db else f"{site_dir}/sensitive"
+            os.makedirs(dest_dir, exist_ok=True)
+            filepath = os.path.join(dest_dir, filename)
+
+            if os.path.exists(filepath):
+                base, ext = os.path.splitext(filename)
+                filename = f"{base}_{hashlib.md5(url.encode()).hexdigest()[:6]}{ext}"
                 filepath = os.path.join(dest_dir, filename)
 
-                if os.path.exists(filepath):
-                    base, ext = os.path.splitext(filename)
-                    filename = f"{base}_{hashlib.md5(url.encode()).hexdigest()[:6]}{ext}"
-                    filepath = os.path.join(dest_dir, filename)
+            shutil.move(tmp_path, filepath)
+            tmp_path = None
 
-                shutil.move(tmp_path, filepath)
+            file_info = {
+                'url': url,
+                'filename': filename,
+                'size': size,
+                'path': filepath,
+                'type': self.classify_sensitive_file(filename),
+                'real_type': real_type,
+                'content_preview': head[:200].decode('utf-8', errors='ignore')
+            }
 
-                file_info = {
-                    'url': url,
-                    'filename': filename,
-                    'size': size,
-                    'path': filepath,
-                    'type': self.classify_sensitive_file(filename),
-                    'real_type': real_type,
-                    'content_preview': head[:200].decode('utf-8', errors='ignore')
-                }
+            with self.lock:
+                if is_db:
+                    self.results['databases'].append(file_info)
+                    self.results['statistics']['total_databases'] += 1
+                else:
+                    self.results['sensitive_files'].append(file_info)
+                    self.results['statistics']['total_sensitive'] += 1
 
-                with self.lock:
-                    if is_db:
-                        self.results['databases'].append(file_info)
-                        self.results['statistics']['total_databases'] += 1
-                        print(f"    {self.colorize('🗄️  BASE:', 'magenta')} {filename} ({size} o) [{real_type}]")
-                    else:
-                        self.results['sensitive_files'].append(file_info)
-                        self.results['statistics']['total_sensitive'] += 1
-                        print(f"    {self.colorize('🔴 SENSIBLE:', 'red')} {filename} ({size} o) [{real_type}]")
-                    print(f"        📍 {url}")
+            if is_db:
+                print(f"    {self.colorize('🗄️  BASE:', 'magenta')} {filename} ({size} o) [{real_type}]")
+            else:
+                print(f"    {self.colorize('🔴 SENSIBLE:', 'red')} {filename} ({size} o) [{real_type}]")
+            print(f"        📍 {url}")
 
-                if is_db and self.config['analyze_db']:
+            # Analyse DB (hors lock)
+            if is_db and self.config['analyze_db']:
+                try:
                     self.analyze_database(filepath, real_type, filename)
+                except Exception as e:
+                    self.log_error(f"analyze_database({filename}): {e}")
 
-                return True
+            return True
 
         except Exception as e:
             self.log_error(f"download_sensitive_file({url}): {e}")
-            print(f"    {self.colorize('⚠️', 'yellow')} Erreur: {str(e)[:60]}")
+            print(f"    {self.colorize('⚠️', 'yellow')} Erreur DL {url}: {str(e)[:80]}")
             return False
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def identify_file_type(self, content: bytes) -> str:
         for magic, name in self.magic_signatures.items():
@@ -958,6 +1022,7 @@ class JATHNIELCrawlerPro:
             'error': None
         }
 
+        tmp_path = None
         try:
             tmp_path = f"/tmp/{hashlib.md5(filename.encode()).hexdigest()}_analyze"
             shutil.copy2(filepath, tmp_path)
@@ -986,13 +1051,15 @@ class JATHNIELCrawlerPro:
                     result['tables'][table] = {'error': str(e)}
 
             conn.close()
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
 
         except Exception as e:
             result['error'] = str(e)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
         return result
 
@@ -1058,28 +1125,50 @@ class JATHNIELCrawlerPro:
             'error': None
         }
 
+        tmp_path = None
         try:
-            with gzip.open(filepath, 'rb') as f:
-                decompressed = f.read()
+            # Detecter le type de compression
+            with open(filepath, 'rb') as f:
+                magic = f.read(6)
 
-            decompressed_path = filepath + '.decompressed'
-            with open(decompressed_path, 'wb') as f:
-                f.write(decompressed)
+            tmp_path = filepath + '.decompressed'
 
-            real_type = self.identify_file_type(decompressed[:100])
+            if magic.startswith(b'\x1f\x8b'):
+                with gzip.open(filepath, 'rb') as f_in, open(tmp_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            elif magic.startswith(b'BZh'):
+                with bz2.open(filepath, 'rb') as f_in, open(tmp_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            elif magic.startswith(b'\xfd7zXZ'):
+                with lzma.open(filepath, 'rb') as f_in, open(tmp_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            else:
+                result['error'] = 'compression non reconnue'
+                return result
+
+            with open(tmp_path, 'rb') as f:
+                head = f.read(100)
+            real_type = self.identify_file_type(head)
             result['decompressed_type'] = real_type
 
             if real_type == 'sqlite':
-                sub = self.analyze_sqlite(decompressed_path, filename + '.decompressed')
+                sub = self.analyze_sqlite(tmp_path, filename + '.decompressed')
                 result['tables'] = sub.get('tables', {})
             elif 'dump' in real_type:
-                sub = self.analyze_sql_dump(decompressed_path, filename + '.decompressed')
+                sub = self.analyze_sql_dump(tmp_path, filename + '.decompressed')
                 result['tables'] = sub.get('tables', {})
             else:
-                result['preview'] = decompressed[:500].decode('utf-8', errors='ignore')
+                with open(tmp_path, 'rb') as f:
+                    result['preview'] = f.read(500).decode('utf-8', errors='ignore')
 
         except Exception as e:
             result['error'] = str(e)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
         return result
 
@@ -1363,6 +1452,51 @@ class JATHNIELCrawlerPro:
 
         return comments
 
+    # ==================== CHANGER DE CIBLE ====================
+
+    def change_target(self):
+        """Change la cible actuelle et reset l'etat."""
+        print(self.colorize("\n🎯 CHANGER DE CIBLE", 'bold'))
+        print(self.colorize("=" * 60, 'cyan'))
+        print(f"Cible actuelle: {self.target_url or '(aucune)'}")
+
+        new_url = self.get_user_input("\nNouvelle URL cible (vide pour annuler)", "")
+        if not new_url:
+            print(self.colorize("\n⚠️ Changement annule", 'yellow'))
+            input(self.colorize("Appuyez sur Entree...", 'blue'))
+            return
+
+        # Normaliser l'URL
+        if not new_url.startswith(('http://', 'https://')):
+            new_url = 'https://' + new_url
+
+        # Verifier la validite
+        try:
+            parsed = urlparse(new_url)
+            if not parsed.netloc:
+                raise ValueError("URL invalide")
+        except Exception:
+            print(self.colorize(f"\n❌ URL invalide: {new_url}", 'red'))
+            input(self.colorize("Appuyez sur Entree...", 'blue'))
+            return
+
+        # Demander si on reset
+        if self.target_url and self.get_yes_no("\n🗑️  Effacer les resultats precedents ?"):
+            self.reset_state()
+            print(self.colorize("  ✓ Resultats effaces", 'green'))
+        else:
+            self.reset_state()
+            print(self.colorize("  ✓ Etat reinitialise (nouveau crawl prealable)", 'green'))
+
+        self.target_url = new_url
+        self.target_domain = parsed.netloc
+
+        print(self.colorize(f"\n✅ Nouvelle cible: {self.target_url}", 'green'))
+        print(f"   Domaine: {self.target_domain}")
+        print(f"   Dossier: {self.config['output_dir']}/{self.target_domain}")
+
+        input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
+
     # ==================== AFFICHAGE ET EXPORT ====================
 
     def download_specific_file(self):
@@ -1457,6 +1591,7 @@ class JATHNIELCrawlerPro:
     def show_results(self):
         print(self.colorize("\n📊 RESULTATS DU CRAWL", 'bold'))
         print(self.colorize("=" * 60, 'cyan'))
+        print(f"Cible: {self.target_url or '(aucune)'}")
 
         print(f"\n📄 Pages decouvertes: {len(self.results['pages'])}")
         print(f"📦 Assets telecharges: {len(self.results['assets'])}")
@@ -1475,26 +1610,26 @@ class JATHNIELCrawlerPro:
         print(self.colorize("\n📤 EXPORT DES RESULTATS", 'bold'))
         print(self.colorize("=" * 60, 'cyan'))
 
-        print("Formats disponibles:")
-        print("  1. JSON")
-        print("  2. HTML")
-        print("  3. CSV")
-
-        choice = self.get_user_input("Choisissez le format", "1")
-
         if not self.target_domain:
             print(self.colorize("❌ Aucun crawl effectue", 'red'))
             input(self.colorize("\nAppuyez sur Entree...", 'blue'))
             return
+
+        print("Formats disponibles:")
+        print("  1. JSON")
+        print("  2. HTML")
+        print("  3. CSV")
+        print("  4. Tous les formats")
+
+        choice = self.get_user_input("Choisissez le format", "4")
 
         site_dir = f"{self.config['output_dir']}/{self.target_domain}"
         os.makedirs(f"{site_dir}/reports", exist_ok=True)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        if choice == '1':
+        if choice in ('1', '4'):
             filename = f"{site_dir}/reports/crawl_report_{timestamp}.json"
-            # Ne pas inclure le HTML brut dans le JSON (trop lourd)
             export_data = dict(self.results)
             export_data['pages'] = [
                 {k: v for k, v in p.items() if k != 'html'}
@@ -1502,17 +1637,17 @@ class JATHNIELCrawlerPro:
             ]
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, indent=2, default=str)
-            print(self.colorize(f"✅ Exporte dans: {filename}", 'green'))
+            print(self.colorize(f"✅ JSON: {filename}", 'green'))
 
-        elif choice == '2':
+        if choice in ('2', '4'):
             filename = f"{site_dir}/reports/crawl_report_{timestamp}.html"
             self.export_html_report(filename)
-            print(self.colorize(f"✅ Exporte dans: {filename}", 'green'))
+            print(self.colorize(f"✅ HTML: {filename}", 'green'))
 
-        elif choice == '3':
+        if choice in ('3', '4'):
             filename = f"{site_dir}/reports/crawl_report_{timestamp}.csv"
             self.export_csv_report(filename)
-            print(self.colorize(f"✅ Exporte dans: {filename}", 'green'))
+            print(self.colorize(f"✅ CSV: {filename}", 'green'))
 
         input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
@@ -1521,7 +1656,7 @@ class JATHNIELCrawlerPro:
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Crawl Report - JATHNIEL v4.1</title>
+    <title>Crawl Report - JATHNIEL v4.2</title>
     <style>
         body {{ font-family: Arial; margin: 20px; background: #f5f5f5; }}
         .container {{ max-width: 1200px; margin: auto; background: white; padding: 20px; border-radius: 10px; }}
@@ -1547,7 +1682,7 @@ class JATHNIELCrawlerPro:
 <body>
     <div class="container">
         <div class="header">
-            <h1>🕷️ Web Crawl Report v4.1</h1>
+            <h1>🕷️ Web Crawl Report v4.2</h1>
             <p>Generated by JATHNIEL-WEB-CRAWLER-PRO</p>
             <p>Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
             <p>Target: {self.target_url}</p>
@@ -1636,7 +1771,7 @@ class JATHNIELCrawlerPro:
         </ul>
 
         <div class="footer">
-            <p>Generated by JATHNIEL-WEB-CRAWLER-PRO v4.1</p>
+            <p>Generated by JATHNIEL-WEB-CRAWLER-PRO v4.2</p>
             <p>CTF / Lab Tool - For educational and authorized purposes only</p>
             <p>★ JATHNIEL ★</p>
         </div>
@@ -1648,10 +1783,11 @@ class JATHNIELCrawlerPro:
             f.write(html)
 
     def export_csv_report(self, filename):
-        import csv
-
         with open(filename, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
+
+            writer.writerow(['TARGET', self.target_url])
+            writer.writerow([])
 
             writer.writerow(['DATABASES'])
             writer.writerow(['File', 'Type', 'Size', 'URL', 'Tables'])
@@ -1686,6 +1822,7 @@ class JATHNIELCrawlerPro:
 
         print(self.colorize("\n📊 STATISTIQUES DU CRAWL", 'bold'))
         print(self.colorize("=" * 60, 'cyan'))
+        print(f"Cible: {self.target_url or '(aucune)'}")
 
         print(f"\n📄 Pages decouvertes: {stats['total_pages']}")
         print(f"📦 Assets telecharges: {stats['total_assets']}")
@@ -1707,7 +1844,7 @@ class JATHNIELCrawlerPro:
 
     def show_help(self):
         help_text = f"""
-{self.colorize('📚 WEB CRAWLER PRO v4.1 - GUIDE D UTILISATION', 'bold')}
+{self.colorize('📚 WEB CRAWLER PRO v4.2 - GUIDE D UTILISATION', 'bold')}
 {self.colorize('=' * 60, 'cyan')}
 
 {self.colorize('1. Crawl complet', 'green')}
@@ -1720,22 +1857,31 @@ class JATHNIELCrawlerPro:
    - Identification par magic bytes
    - Analyse automatique du contenu
 
-{self.colorize('3. Telechargement specifique', 'green')}
+{self.colorize('3. Changer de cible', 'green')}
+   - Modifie la cible actuelle
+   - Reset l'etat (visited_urls, resultats)
+   - Demande si tu veux effacer les resultats
+
+{self.colorize('4. Telechargement specifique', 'green')}
    - Telecharge un fichier specifique
 
-{self.colorize('4. Export des resultats', 'green')}
+{self.colorize('5-7. Visualiser les resultats', 'green')}
+   - Voir les resultats generaux, fichiers sensibles, bases
+
+{self.colorize('8. Export des resultats', 'green')}
    - JSON / HTML / CSV
 
-{self.colorize('🆕 NOUVEAU v4.1 :', 'yellow')}
-   - Threading corrige (queue.Queue + semaphore)
-   - Amorcage via robots.txt + sitemap.xml
-   - Telechargements en streaming
+{self.colorize('🆕 NOUVEAU v4.2 :', 'yellow')}
+   - Worker ne sort plus trop tot (verif active_workers)
+   - Telechargement robuste (cleanup garanti + close)
+   - Option 3 : changer de cible facilement
+   - Detection de compression auto (gzip/bz2/xz)
    - Log d'erreurs centralise (errors.log)
-   - Plus de re-GET dans les analyses
 
 {self.colorize('⚠️ RAPPEL', 'red')}
    - Cadre CTF / Labo uniquement
-        """
+   - Autorisation ecrite requise pour toute cible non-locale
+"""
         print(help_text)
 
     # ==================== MENU PRINCIPAL ====================
@@ -1749,45 +1895,52 @@ class JATHNIELCrawlerPro:
             choice = input(self.colorize("\n👉 Votre choix: ", 'bold')).strip()
 
             if choice == '1':
-                url = self.get_user_input("URL cible", "https://example.com")
+                url = self.get_user_input("URL cible", self.target_url or "https://example.com")
                 if url:
+                    if not url.startswith(('http://', 'https://')):
+                        url = 'https://' + url
                     self.crawl_complete(url)
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
             elif choice == '2':
-                url = self.get_user_input("URL cible", "https://example.com")
+                url = self.get_user_input("URL cible", self.target_url or "https://example.com")
                 if url:
+                    if not url.startswith(('http://', 'https://')):
+                        url = 'https://' + url
                     self.config['download_sensitive'] = True
                     self.config['analyze_db'] = True
                     self.crawl_complete(url)
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
             elif choice == '3':
-                self.download_specific_file()
+                self.change_target()
 
             elif choice == '4':
+                self.download_specific_file()
+
+            elif choice == '5':
                 self.show_results()
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
-            elif choice == '5':
+            elif choice == '6':
                 self.show_sensitive_files()
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
-            elif choice == '6':
+            elif choice == '7':
                 self.show_databases()
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
-            elif choice == '7':
+            elif choice == '8':
                 self.export_results()
 
-            elif choice == '8':
+            elif choice == '9':
                 self.show_config()
 
-            elif choice == '9':
+            elif choice == '10':
                 self.show_statistics()
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
-            elif choice == '10':
+            elif choice == '11':
                 self.show_help()
                 input(self.colorize("\nAppuyez sur Entree pour continuer...", 'blue'))
 
